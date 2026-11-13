@@ -1,4 +1,15 @@
-#include <stdio.h>      //if you don't use scanf/printf change this include
+#ifndef HEADERS_H
+#define HEADERS_H
+
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <limits.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/file.h>
@@ -7,61 +18,82 @@
 #include <sys/sem.h>
 #include <sys/msg.h>
 #include <sys/wait.h>
-#include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+
+/* Keep the clock key supplied with the project. */
+#define SHKEY 300
+
+#define MAX_PROCESSES 1000
+#define MAX_RESOURCES 1000
+#define RESOURCE_NAME_LEN 32
+
+#define MSG_PROCESS   2L
+#define MSG_RESOURCE  3L
+#define MSG_INPUT_END 4L
+#define MSG_FINISHED  5L
+
+#define ALG_SJF 1
+#define ALG_RR  2
+#define ALG_HPF 3
 
 typedef short bool;
 #define true 1
 #define false 0
 
-#define SHKEY 300
+/* Shared clock address. Each executable has its own copy of this pointer. */
+int *shmaddr = NULL;
 
-
-///==============================
-//don't mess with this variable//
-int * shmaddr;                 //
-//===============================
-
-
-
-int getClk()
+static inline int getClk(void)
 {
     return *shmaddr;
 }
 
-
-/*
- * All process call this function at the beginning to establish communication between them and the clock module.
- * Again, remember that the clock is only emulation!
-*/
-void initClk()
+static inline void initClk(void)
 {
-    int shmid = shmget(SHKEY, 4, 0444);
-    while ((int)shmid == -1)
+    int shmid = shmget(SHKEY, sizeof(int), 0444);
+    while (shmid == -1)
     {
-        //Make sure that the clock exists
-        printf("Wait! The clock not initialized yet!\n");
+        if (errno != ENOENT && errno != EINVAL)
+            perror("shmget clock");
         sleep(1);
-        shmid = shmget(SHKEY, 4, 0444);
+        shmid = shmget(SHKEY, sizeof(int), 0444);
     }
-    shmaddr = (int *) shmat(shmid, (void *)0, 0);
-}
 
-
-/*
- * All process call this function at the end to release the communication
- * resources between them and the clock module.
- * Again, Remember that the clock is only emulation!
- * Input: terminateAll: a flag to indicate whether that this is the end of simulation.
- *                      It terminates the whole system and releases resources.
-*/
-
-void destroyClk(bool terminateAll)
-{
-    shmdt(shmaddr);
-    if (terminateAll)
+    shmaddr = (int *)shmat(shmid, NULL, 0);
+    if (shmaddr == (void *)-1)
     {
-        killpg(getpgrp(), SIGINT);
+        perror("shmat clock");
+        exit(EXIT_FAILURE);
     }
 }
+
+static inline void destroyClk(bool terminateAll)
+{
+    if (shmaddr != NULL && shmaddr != (void *)-1)
+    {
+        shmdt(shmaddr);
+        shmaddr = NULL;
+    }
+
+    /* Prefer that the generator (the owner) terminates clk.out by PID. */
+    if (terminateAll)
+        killpg(getpgrp(), SIGINT);
+}
+
+/* One common message layout makes the queue interface easy to share. */
+typedef struct
+{
+    long mtype;                 /* Must be first for System V message queues. */
+    int id;
+    int arrival;
+    int runtime;
+    int priority;
+    int captureTime;
+    int releaseTime;
+    char resource[RESOURCE_NAME_LEN];
+} IPCMessage;
+
+#define IPC_MESSAGE_SIZE (sizeof(IPCMessage) - sizeof(long))
+
+#endif
