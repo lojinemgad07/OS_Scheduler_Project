@@ -1,66 +1,35 @@
 #include "headers.h"
+#include <errno.h>
+#include <limits.h>
 
-static volatile sig_atomic_t wasResumed = 1;
+static volatile sig_atomic_t resumed;
+static void onContinue(int signal_number) { (void)signal_number; resumed = 1; }
 
-static void handleContinue(int signum)
+int main(int argc, char **argv)
 {
-    (void)signum;
-    wasResumed = 1;
-}
-
-int main(int argc, char *argv[])
-{
-    if (argc != 4)
-    {
-        fprintf(stderr, "Usage: ./process.out <process_id> <runtime> <message_queue_id>\n");
-        return EXIT_FAILURE;
+    if (argc != 2) { fprintf(stderr, "usage: process.out runtime\n"); return 2; }
+    char *end = NULL;
+    long remaining = strtol(argv[1], &end, 10);
+    if (!end || *end || remaining < 0 || remaining > INT_MAX) {
+        fprintf(stderr, "invalid runtime\n"); return 2;
     }
-
-    int processId = atoi(argv[1]);
-    int totalRuntime = atoi(argv[2]);
-    int queueId = atoi(argv[3]);
-
-    if (processId <= 0 || totalRuntime <= 0 || queueId < 0)
-    {
-        fprintf(stderr, "Invalid process arguments.\n");
-        return EXIT_FAILURE;
-    }
-
-    signal(SIGCONT, handleContinue);
+    struct sigaction action;
+    action.sa_handler = onContinue;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = 0;
+    sigaction(SIGCONT, &action, NULL);
     initClk();
-
-    int executedTime = 0;
-    int lastClock = getClk();
-    wasResumed = 1;
-
-   
-    while (executedTime < totalRuntime)
-    {
-        if (wasResumed)
-        {
-            lastClock = getClk();
-            wasResumed = 0;
+    int previous = getClk();
+    while (remaining > 0) {
+        int now = getClk();
+        if (resumed) { previous = now; resumed = 0; }
+        if (now > previous) {
+            remaining -= now - previous;
+            previous = now;
         }
-
-        int currentClock = getClk();
-        if (currentClock > lastClock)
-        {
-            executedTime += currentClock - lastClock;
-            lastClock = currentClock;
-
-            if (executedTime > totalRuntime)
-                executedTime = totalRuntime;
-        }
+        /* The clock is the simulation source; don't burn a CPU core while it is still. */
+        if (remaining > 0 && now == previous) usleep(1000);
     }
-
-    IPCMessage finishedMessage = {0};
-    finishedMessage.mtype = MSG_FINISHED;
-    finishedMessage.id = processId;
-    finishedMessage.runtime = totalRuntime;
-
-    if (msgsnd(queueId, &finishedMessage, IPC_MESSAGE_SIZE, 0) == -1)
-        perror("process: msgsnd completion");
-
     destroyClk(false);
-    return EXIT_SUCCESS;
+    return 0;
 }
