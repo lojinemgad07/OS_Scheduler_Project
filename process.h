@@ -5,6 +5,7 @@
 
 /* Possible states of a process */
 typedef enum {
+    NEW,
     READY,
     RUNNING,
     BLOCKED,
@@ -46,6 +47,8 @@ typedef struct PCB {
 
     /* Current state */
     ProcessState state;
+    int policy_registered;
+    int needs_ready_queue_update;
 
     /* Linked-list support */
     struct PCB *next;
@@ -61,3 +64,6 @@ typedef struct {
 } ResourceEvent;
 
 #endif
+
+
+

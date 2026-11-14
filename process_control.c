@@ -57,21 +57,40 @@ int unblockProcess(PCB *p)
 {
     if (!p || p->state != BLOCKED) { errno = EINVAL; return -1; }
     p->state = READY;
+    p->needs_ready_queue_update = 1;
     return 0;
 }
 
 int finishProcess(PCB *p)
 {
-    if (!p) { errno = EINVAL; return -1; }
+    if (!p) {
+        errno = EINVAL;
+        return -1;
+    }
+
     if (p->pid > 0) {
+        if (p->state == BLOCKED && kill(p->pid, SIGCONT) == -1 && errno != ESRCH) {
+            return -1;
+        }
+
         int status;
-        pid_t r;
-        do { r = waitpid(p->pid, &status, 0); } while (r == -1 && errno == EINTR);
-        if (r == -1 && errno != ECHILD) return -1;
+        pid_t result;
+        do {
+            result = waitpid(p->pid, &status, 0);
+        } while (result == -1 && errno == EINTR);
+
+        if (result == -1 && errno != ECHILD) {
+            return -1;
+        }
         p->pid = 0;
     }
+
     p->state = FINISHED;
     return 0;
 }
+
+
+
+
 
 

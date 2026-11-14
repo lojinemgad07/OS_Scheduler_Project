@@ -262,10 +262,15 @@ int main(void)
         }
     }
 
-    printf("Context-switch time: ");
-    if (scanf("%d", &context_switch) != 1 || context_switch < 0) {
-        fprintf(stderr, "context-switch time must be nonnegative\n");
-        goto fail;
+    if (algorithm == 2) {
+        printf("Context-switch time: ");
+        if (scanf("%d", &context_switch) != 1 || context_switch < 0) {
+            fprintf(stderr, "context-switch time must be nonnegative\n");
+            goto fail;
+        }
+    } else {
+        context_switch = 1;
+        printf("SJF and HPF use a fixed 1-second context switch.\n");
     }
 
     queue_id = msgget(SCHEDULER_QUEUE_KEY, IPC_CREAT | 0666);
@@ -319,22 +324,35 @@ int main(void)
     }
 
     size_t next_process = 0;
+    int announced_time = -1;
+
     while (next_process < process_count && !interrupted) {
         int now = getClk();
 
-        while (next_process < process_count &&
-               processes[next_process].arrival <= now) {
-            SchedulerMessage message = {0};
-            message.type = MSG_PROCESS;
-            message.id = processes[next_process].id;
-            message.arrival = processes[next_process].arrival;
-            message.runtime = processes[next_process].runtime;
-            message.priority = processes[next_process].priority;
+        while (announced_time < now) {
+            announced_time++;
 
-            if (sendMessage(&message)) {
+            while (next_process < process_count &&
+                   processes[next_process].arrival <= announced_time) {
+                SchedulerMessage message = {0};
+                message.type = MSG_PROCESS;
+                message.id = processes[next_process].id;
+                message.arrival = processes[next_process].arrival;
+                message.runtime = processes[next_process].runtime;
+                message.priority = processes[next_process].priority;
+
+                if (sendMessage(&message)) {
+                    goto running_fail;
+                }
+                next_process++;
+            }
+
+            SchedulerMessage time_message = {0};
+            time_message.type = MSG_TIME;
+            time_message.arrival = announced_time;
+            if (sendMessage(&time_message)) {
                 goto running_fail;
             }
-            next_process++;
         }
 
         if (next_process < process_count) {
@@ -370,3 +388,4 @@ fail:
     cleanup();
     return 1;
 }
+

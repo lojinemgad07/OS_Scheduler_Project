@@ -10,6 +10,12 @@
 #include <sys/wait.h>
 
 /* Weak defaults keep the coordinator buildable before policy files are merged. */
+__attribute__((weak)) void processArrived(PCB *process, SchedulingAlgorithm algorithm)
+{
+    (void)process;
+    (void)algorithm;
+}
+
 __attribute__((weak)) PCB *selectNextProcess(PCB *processes, SchedulingAlgorithm algorithm, int now, int quantum)
 {
     (void)processes;
@@ -17,6 +23,12 @@ __attribute__((weak)) PCB *selectNextProcess(PCB *processes, SchedulingAlgorithm
     (void)now;
     (void)quantum;
     return NULL;
+}
+
+__attribute__((weak)) void processDispatched(PCB *process, SchedulingAlgorithm algorithm)
+{
+    (void)process;
+    (void)algorithm;
 }
 
 __attribute__((weak)) int shouldPreempt(PCB *running, PCB *processes, SchedulingAlgorithm algorithm, int now, int quantum, int quantum_used)
@@ -30,17 +42,25 @@ __attribute__((weak)) int shouldPreempt(PCB *running, PCB *processes, Scheduling
     return 0;
 }
 
-__attribute__((weak)) void handleResourceEvents(PCB *processes, SchedulerResourceEvent *events, int now)
+__attribute__((weak)) void processPreempted(PCB *process, SchedulingAlgorithm algorithm)
+{
+    (void)process;
+    (void)algorithm;
+}
+
+__attribute__((weak)) void processUnblocked(PCB *process, SchedulingAlgorithm algorithm)
+{
+    (void)process;
+    (void)algorithm;
+}
+
+__attribute__((weak)) void handleResourceEvents(PCB *processes, SchedulerResourceEvent *events, int now, SchedulingAlgorithm algorithm)
 {
     (void)processes;
     (void)events;
     (void)now;
+    (void)algorithm;
 }
-
-typedef struct ResourceNode {
-    ResourceEvent event;
-    struct ResourceNode *next;
-} ResourceNode;
 
 static volatile sig_atomic_t stop_requested;
 
@@ -61,7 +81,7 @@ static PCB *findProcess(PCB *head, int id)
     return NULL;
 }
 
-static int receiveMessages(int qid, PCB **head, PCB **tail, SchedulerResourceEvent **resource_head, int *input_ended)
+static int receiveMessages(int qid, PCB **head, PCB **tail, SchedulerResourceEvent **resource_head, int *input_ended, int *arrival_watermark, SchedulingAlgorithm algorithm)
 {
     SchedulerMessage m;
 
@@ -106,7 +126,7 @@ static int receiveMessages(int qid, PCB **head, PCB **tail, SchedulerResourceEve
             p->last_start_time = -1;
             p->finish_time = -1;
             p->pid = 0;
-            p->state = READY;
+            p->state = NEW;
 
             if (*tail) {
                 (*tail)->next = p;
@@ -128,6 +148,10 @@ static int receiveMessages(int qid, PCB **head, PCB **tail, SchedulerResourceEve
             node->next = *resource_head;
             *resource_head = node;
             /* The HPF/resource module consumes these retained events. */
+        } else if (m.type == MSG_TIME) {
+            if (m.arrival > *arrival_watermark) {
+                *arrival_watermark = m.arrival;
+            }
         } else if (m.type == MSG_END) {
             *input_ended = 1;
         }
@@ -165,8 +189,10 @@ static int reapFinished(PCB *head, PCB **running, int now)
         int status;
         pid_t result = waitpid(p->pid, &status, WNOHANG);
         if (result == p->pid) {
-            p->pid = 0;
-            p->state = FINISHED;
+            if (finishProcess(p) == -1) {
+                perror("finishProcess");
+                return -1;
+            }
             p->remaining_time = 0;
             p->finish_time = now;
             if (*running == p) {
@@ -177,7 +203,7 @@ static int reapFinished(PCB *head, PCB **running, int now)
             return -1;
         }
 
-        if (p->state == RUNNING && p->remaining_time <= 0) {
+        if (p->state != FINISHED && p->remaining_time <= 0) {
             if (finishProcess(p) == -1) {
                 perror("finishProcess");
                 return -1;
@@ -192,6 +218,15 @@ static int reapFinished(PCB *head, PCB **running, int now)
     return 0;
 }
 
+static int hasReadyProcess(PCB *head, PCB *running)
+{
+    for (PCB *p = head; p; p = p->next) {
+        if (p != running && p->state == READY) {
+            return 1;
+        }
+    }
+    return 0;
+}
 static int allFinished(PCB *head)
 {
     if (!head) {
@@ -284,32 +319,93 @@ int main(int argc, char **argv)
     PCB *running = NULL;
     SchedulerResourceEvent *resources = NULL;
     int input_ended = 0;
+    int arrival_watermark = -1;
     int quantum_used = 0;
     int last_time = getClk();
     int switching_until = -1;
-    int dispatched_once = 0;
+    int switch_pending = 0;
     int warned_no_policy = 0;
 
     while (!stop_requested) {
-        if (receiveMessages(qid, &processes, &tail, &resources, &input_ended) == -1) {
+        int now = getClk();
+        accountElapsed(processes, running, &last_time, now, &quantum_used);
+
+        if (receiveMessages(qid,
+                            &processes,
+                            &tail,
+                            &resources,
+                            &input_ended,
+                            &arrival_watermark,
+                            algorithm) == -1) {
             break;
         }
 
-        int now = getClk();
-        accountElapsed(processes, running, &last_time, now, &quantum_used);
-        handleResourceEvents(processes, resources, now);
+        /* Running-process resource events precede completion at this tick. */
+        handleResourceEvents(processes, resources, now, algorithm);
+        for (PCB *p = processes; p; p = p->next) {
+            if (p->needs_ready_queue_update) {
+                processUnblocked(p, algorithm);
+                p->needs_ready_queue_update = 0;
+            }
+        }
+        if (running && running->state != RUNNING) {
+            running = NULL;
+            quantum_used = 0;
+            switch_pending = 1;
+        }
+
+        PCB *running_before_reap = running;
         if (reapFinished(processes, &running, now) == -1) {
             break;
         }
-
-        if (running && shouldPreempt(running, processes, algorithm, now, quantum, quantum_used)) {
-            if (stopProcess(running) == -1) {
-                perror("stopProcess");
-                break;
-            }
-            running = NULL;
+        if (running_before_reap && !running) {
             quantum_used = 0;
-            switching_until = context_switch ? now + context_switch : now;
+            switch_pending = 1;
+        }
+
+        /* Admit arrivals after running-process events and finishes. */
+        for (PCB *p = processes; p; p = p->next) {
+            if (!p->policy_registered && p->arrival_time <= now) {
+                p->waiting_time += now - p->arrival_time;
+                p->state = READY;
+                processArrived(p, algorithm);
+                p->policy_registered = 1;
+            }
+        }
+
+        /* Wait for the generator's same-tick arrival batch before RR decisions. */
+        if (!input_ended && arrival_watermark < now) {
+            usleep(1000);
+            continue;
+        }
+
+        if (running) {
+            int rr_quantum_expired = algorithm == SCHED_RR &&
+                                     quantum_used >= quantum;
+            int rr_queue_empty = rr_quantum_expired &&
+                                 !hasReadyProcess(processes, running);
+
+            if (!rr_queue_empty &&
+                shouldPreempt(running,
+                              processes,
+                              algorithm,
+                              now,
+                              quantum,
+                              quantum_used)) {
+                PCB *stopped = running;
+                if (stopProcess(stopped) == -1) {
+                    perror("stopProcess");
+                    break;
+                }
+                processPreempted(stopped, algorithm);
+                running = NULL;
+                quantum_used = 0;
+                switch_pending = 0;
+                switching_until = context_switch ? now + context_switch : now;
+            } else if (rr_quantum_expired) {
+                /* Continue with another quantum; no stop or context switch occurs. */
+                quantum_used %= quantum;
+            }
         }
 
         if (!running && (switching_until < 0 || now >= switching_until)) {
@@ -321,8 +417,9 @@ int main(int argc, char **argv)
                     break;
                 }
 
-                if (dispatched_once && context_switch > 0 && switching_until < 0) {
+                if (switch_pending && context_switch > 0 && switching_until < 0) {
                     switching_until = now + context_switch;
+                    switch_pending = 0;
                 } else {
                     if (next->pid == 0) {
                         if (startProcess(next) == -1) {
@@ -339,20 +436,31 @@ int main(int argc, char **argv)
 
                     next->last_start_time = now;
                     next->state = RUNNING;
+                    processDispatched(next, algorithm);
                     running = next;
                     quantum_used = 0;
-                    dispatched_once = 1;
+                    switch_pending = 0;
                     switching_until = -1;
                     last_time = now;
                 }
-            } else if (input_ended && allFinished(processes)) {
-                break;
-            } else if (input_ended && !warned_no_policy) {
-                fprintf(stderr,
-                        "scheduler: no scheduling policy selected a READY "
-                        "process; link the SJF/RR/HPF policy hooks\n");
-                warned_no_policy = 1;
-                break;
+            } else {
+                if (switching_until >= 0 && now >= switching_until) {
+                    switching_until = -1;
+                }
+                if (switching_until < 0) {
+                    switch_pending = 0;
+                }
+
+                if (input_ended && allFinished(processes)) {
+                    break;
+                }
+                if (input_ended && !warned_no_policy) {
+                    fprintf(stderr,
+                            "scheduler: no scheduling policy selected a READY "
+                            "process; link the SJF/RR/HPF policy hooks\n");
+                    warned_no_policy = 1;
+                    break;
+                }
             }
         }
 
@@ -364,4 +472,18 @@ int main(int argc, char **argv)
     freeData(processes, resources);
     return stop_requested ? 130 : 0;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
