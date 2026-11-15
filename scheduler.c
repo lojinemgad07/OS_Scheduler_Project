@@ -3,6 +3,7 @@
 #include "process_control.h"
 #include "ipc.h"
 #include "scheduler_policy.h"
+#include "logger.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -72,8 +73,10 @@ static void requestStop(int sig)
 
 static PCB *findProcess(PCB *head, int id)
 {
-    for (PCB *p = head; p; p = p->next) {
-        if (p->id == id) {
+    for (PCB *p = head; p; p = p->next)
+    {
+        if (p->id == id)
+        {
             return p;
         }
     }
@@ -85,14 +88,19 @@ static int receiveMessages(int qid, PCB **head, PCB **tail, SchedulerResourceEve
 {
     SchedulerMessage m;
 
-    for (;;) {
+    for (;;)
+    {
         ssize_t n = msgrcv(qid, &m, sizeof(m) - sizeof(m.type), 0, IPC_NOWAIT);
-        if (n == -1) {
-            if (errno == ENOMSG) {
+        if (n == -1)
+        {
+            if (errno == ENOMSG)
+            {
                 return 0;
             }
-            if (errno == EINTR) {
-                if (stop_requested) {
+            if (errno == EINTR)
+            {
+                if (stop_requested)
+                {
                     return 0;
                 }
                 continue;
@@ -102,8 +110,10 @@ static int receiveMessages(int qid, PCB **head, PCB **tail, SchedulerResourceEve
             return -1;
         }
 
-        if (m.type == MSG_PROCESS) {
-            if (findProcess(*head, m.id)) {
+        if (m.type == MSG_PROCESS)
+        {
+            if (findProcess(*head, m.id))
+            {
                 fprintf(stderr,
                         "scheduler: duplicate process id %d ignored\n",
                         m.id);
@@ -111,7 +121,8 @@ static int receiveMessages(int qid, PCB **head, PCB **tail, SchedulerResourceEve
             }
 
             PCB *p = calloc(1, sizeof(*p));
-            if (!p) {
+            if (!p)
+            {
                 perror("calloc PCB");
                 return -1;
             }
@@ -128,15 +139,21 @@ static int receiveMessages(int qid, PCB **head, PCB **tail, SchedulerResourceEve
             p->pid = 0;
             p->state = NEW;
 
-            if (*tail) {
+            if (*tail)
+            {
                 (*tail)->next = p;
-            } else {
+            }
+            else
+            {
                 *head = p;
             }
             *tail = p;
-        } else if (m.type == MSG_RESOURCES) {
+        }
+        else if (m.type == MSG_RESOURCES)
+        {
             SchedulerResourceEvent *node = calloc(1, sizeof(*node));
-            if (!node) {
+            if (!node)
+            {
                 perror("calloc resource event");
                 return -1;
             }
@@ -148,11 +165,16 @@ static int receiveMessages(int qid, PCB **head, PCB **tail, SchedulerResourceEve
             node->next = *resource_head;
             *resource_head = node;
             /* The HPF/resource module consumes these retained events. */
-        } else if (m.type == MSG_TIME) {
-            if (m.arrival > *arrival_watermark) {
+        }
+        else if (m.type == MSG_TIME)
+        {
+            if (m.arrival > *arrival_watermark)
+            {
                 *arrival_watermark = m.arrival;
             }
-        } else if (m.type == MSG_END) {
+        }
+        else if (m.type == MSG_END)
+        {
             *input_ended = 1;
         }
     }
@@ -161,17 +183,22 @@ static int receiveMessages(int qid, PCB **head, PCB **tail, SchedulerResourceEve
 static void accountElapsed(PCB *head, PCB *running, int *last_time, int now, int *quantum_used)
 {
     int elapsed = now - *last_time;
-    if (elapsed <= 0) {
+    if (elapsed <= 0)
+    {
         return;
     }
 
-    for (PCB *p = head; p; p = p->next) {
-        if (p == running && p->state == RUNNING) {
+    for (PCB *p = head; p; p = p->next)
+    {
+        if (p == running && p->state == RUNNING)
+        {
             int used = elapsed < p->remaining_time ? elapsed : p->remaining_time;
             p->executed_time += used;
             p->remaining_time -= used;
             *quantum_used += used;
-        } else if (p->state == READY) {
+        }
+        else if (p->state == READY)
+        {
             p->waiting_time += elapsed;
         }
     }
@@ -181,35 +208,45 @@ static void accountElapsed(PCB *head, PCB *running, int *last_time, int now, int
 
 static int reapFinished(PCB *head, PCB **running, int now)
 {
-    for (PCB *p = head; p; p = p->next) {
-        if (p->pid <= 0 || p->state == FINISHED) {
+    for (PCB *p = head; p; p = p->next)
+    {
+        if (p->pid <= 0 || p->state == FINISHED)
+        {
             continue;
         }
 
         int status;
         pid_t result = waitpid(p->pid, &status, WNOHANG);
-        if (result == p->pid) {
-            if (finishProcess(p) == -1) {
+        if (result == p->pid)
+        {
+            if (finishProcess(p) == -1)
+            {
                 perror("finishProcess");
                 return -1;
             }
             p->remaining_time = 0;
             p->finish_time = now;
-            if (*running == p) {
+            if (*running == p)
+            {
                 *running = NULL;
             }
-        } else if (result == -1 && errno != EINTR && errno != ECHILD) {
+        }
+        else if (result == -1 && errno != EINTR && errno != ECHILD)
+        {
             perror("scheduler waitpid");
             return -1;
         }
 
-        if (p->state != FINISHED && p->remaining_time <= 0) {
-            if (finishProcess(p) == -1) {
+        if (p->state != FINISHED && p->remaining_time <= 0)
+        {
+            if (finishProcess(p) == -1)
+            {
                 perror("finishProcess");
                 return -1;
             }
             p->finish_time = now;
-            if (*running == p) {
+            if (*running == p)
+            {
                 *running = NULL;
             }
         }
@@ -220,8 +257,10 @@ static int reapFinished(PCB *head, PCB **running, int now)
 
 static int hasReadyProcess(PCB *head, PCB *running)
 {
-    for (PCB *p = head; p; p = p->next) {
-        if (p != running && p->state == READY) {
+    for (PCB *p = head; p; p = p->next)
+    {
+        if (p != running && p->state == READY)
+        {
             return 1;
         }
     }
@@ -229,12 +268,15 @@ static int hasReadyProcess(PCB *head, PCB *running)
 }
 static int allFinished(PCB *head)
 {
-    if (!head) {
+    if (!head)
+    {
         return 0;
     }
 
-    for (PCB *p = head; p; p = p->next) {
-        if (p->state != FINISHED) {
+    for (PCB *p = head; p; p = p->next)
+    {
+        if (p->state != FINISHED)
+        {
             return 0;
         }
     }
@@ -244,10 +286,13 @@ static int allFinished(PCB *head)
 
 static void terminateChildren(PCB *head)
 {
-    for (PCB *p = head; p; p = p->next) {
-        if (p->pid > 0) {
+    for (PCB *p = head; p; p = p->next)
+    {
+        if (p->pid > 0)
+        {
             kill(p->pid, SIGTERM);
-            while (waitpid(p->pid, NULL, 0) == -1 && errno == EINTR) {
+            while (waitpid(p->pid, NULL, 0) == -1 && errno == EINTR)
+            {
             }
             p->pid = 0;
         }
@@ -256,13 +301,15 @@ static void terminateChildren(PCB *head)
 
 static void freeData(PCB *head, SchedulerResourceEvent *resources)
 {
-    while (head) {
+    while (head)
+    {
         PCB *next = head->next;
         free(head);
         head = next;
     }
 
-    while (resources) {
+    while (resources)
+    {
         SchedulerResourceEvent *next = resources->next;
         free(resources);
         resources = next;
@@ -271,7 +318,8 @@ static void freeData(PCB *head, SchedulerResourceEvent *resources)
 
 int main(int argc, char **argv)
 {
-    if (argc != 4) {
+    if (argc != 4)
+    {
         fprintf(stderr,
                 "usage: scheduler algorithm quantum context_switch_time\n");
         return 2;
@@ -279,7 +327,8 @@ int main(int argc, char **argv)
 
     char *end;
     long algorithm_arg = strtol(argv[1], &end, 10);
-    if (*end || algorithm_arg < SCHED_SJF || algorithm_arg > SCHED_HPF) {
+    if (*end || algorithm_arg < SCHED_SJF || algorithm_arg > SCHED_HPF)
+    {
         fprintf(stderr, "scheduler: invalid algorithm\n");
         return 2;
     }
@@ -287,14 +336,16 @@ int main(int argc, char **argv)
 
     long quantum_arg = strtol(argv[2], &end, 10);
     if (*end || quantum_arg < 0 || quantum_arg > INT_MAX ||
-        (algorithm == SCHED_RR && quantum_arg == 0)) {
+        (algorithm == SCHED_RR && quantum_arg == 0))
+    {
         fprintf(stderr, "scheduler: invalid quantum\n");
         return 2;
     }
     int quantum = (int)quantum_arg;
 
     long context_arg = strtol(argv[3], &end, 10);
-    if (*end || context_arg < 0 || context_arg > INT_MAX) {
+    if (*end || context_arg < 0 || context_arg > INT_MAX)
+    {
         fprintf(stderr, "scheduler: invalid context-switch time\n");
         return 2;
     }
@@ -308,7 +359,8 @@ int main(int argc, char **argv)
     sigaction(SIGTERM, &sa, NULL);
 
     int qid = msgget(SCHEDULER_QUEUE_KEY, 0666);
-    if (qid == -1) {
+    if (qid == -1)
+    {
         perror("scheduler msgget");
         return 1;
     }
@@ -326,7 +378,8 @@ int main(int argc, char **argv)
     int switch_pending = 0;
     int warned_no_policy = 0;
 
-    while (!stop_requested) {
+    while (!stop_requested)
+    {
         int now = getClk();
         accountElapsed(processes, running, &last_time, now, &quantum_used);
 
@@ -336,36 +389,44 @@ int main(int argc, char **argv)
                             &resources,
                             &input_ended,
                             &arrival_watermark,
-                            algorithm) == -1) {
+                            algorithm) == -1)
+        {
             break;
         }
 
         /* Running-process resource events precede completion at this tick. */
         handleResourceEvents(processes, resources, now, algorithm);
-        for (PCB *p = processes; p; p = p->next) {
-            if (p->needs_ready_queue_update) {
+        for (PCB *p = processes; p; p = p->next)
+        {
+            if (p->needs_ready_queue_update)
+            {
                 processUnblocked(p, algorithm);
                 p->needs_ready_queue_update = 0;
             }
         }
-        if (running && running->state != RUNNING) {
+        if (running && running->state != RUNNING)
+        {
             running = NULL;
             quantum_used = 0;
             switch_pending = 1;
         }
 
         PCB *running_before_reap = running;
-        if (reapFinished(processes, &running, now) == -1) {
+        if (reapFinished(processes, &running, now) == -1)
+        {
             break;
         }
-        if (running_before_reap && !running) {
+        if (running_before_reap && !running)
+        {
             quantum_used = 0;
             switch_pending = 1;
         }
 
         /* Admit arrivals after running-process events and finishes. */
-        for (PCB *p = processes; p; p = p->next) {
-            if (!p->policy_registered && p->arrival_time <= now) {
+        for (PCB *p = processes; p; p = p->next)
+        {
+            if (!p->policy_registered && p->arrival_time <= now)
+            {
                 p->waiting_time += now - p->arrival_time;
                 p->state = READY;
                 processArrived(p, algorithm);
@@ -374,12 +435,14 @@ int main(int argc, char **argv)
         }
 
         /* Wait for the generator's same-tick arrival batch before RR decisions. */
-        if (!input_ended && arrival_watermark < now) {
+        if (!input_ended && arrival_watermark < now)
+        {
             usleep(1000);
             continue;
         }
 
-        if (running) {
+        if (running)
+        {
             int rr_quantum_expired = algorithm == SCHED_RR &&
                                      quantum_used >= quantum;
             int rr_queue_empty = rr_quantum_expired &&
@@ -391,9 +454,11 @@ int main(int argc, char **argv)
                               algorithm,
                               now,
                               quantum,
-                              quantum_used)) {
+                              quantum_used))
+            {
                 PCB *stopped = running;
-                if (stopProcess(stopped) == -1) {
+                if (stopProcess(stopped) == -1)
+                {
                     perror("stopProcess");
                     break;
                 }
@@ -402,34 +467,47 @@ int main(int argc, char **argv)
                 quantum_used = 0;
                 switch_pending = 0;
                 switching_until = context_switch ? now + context_switch : now;
-            } else if (rr_quantum_expired) {
+            }
+            else if (rr_quantum_expired)
+            {
                 /* Continue with another quantum; no stop or context switch occurs. */
                 quantum_used %= quantum;
             }
         }
 
-        if (!running && (switching_until < 0 || now >= switching_until)) {
+        if (!running && (switching_until < 0 || now >= switching_until))
+        {
             PCB *next = selectNextProcess(processes, algorithm, now, quantum);
-            if (next) {
-                if (next->state != READY || next->remaining_time <= 0) {
+            if (next)
+            {
+                if (next->state != READY || next->remaining_time <= 0)
+                {
                     fprintf(stderr,
                             "scheduler policy returned a non-ready process\n");
                     break;
                 }
 
-                if (switch_pending && context_switch > 0 && switching_until < 0) {
+                if (switch_pending && context_switch > 0 && switching_until < 0)
+                {
                     switching_until = now + context_switch;
                     switch_pending = 0;
-                } else {
-                    if (next->pid == 0) {
-                        if (startProcess(next) == -1) {
+                }
+                else
+                {
+                    if (next->pid == 0)
+                    {
+                        if (startProcess(next) == -1)
+                        {
                             perror("startProcess");
                             break;
                         }
-                        if (next->first_start_time < 0) {
+                        if (next->first_start_time < 0)
+                        {
                             next->first_start_time = now;
                         }
-                    } else if (resumeProcess(next) == -1) {
+                    }
+                    else if (resumeProcess(next) == -1)
+                    {
                         perror("resumeProcess");
                         break;
                     }
@@ -443,18 +521,24 @@ int main(int argc, char **argv)
                     switching_until = -1;
                     last_time = now;
                 }
-            } else {
-                if (switching_until >= 0 && now >= switching_until) {
+            }
+            else
+            {
+                if (switching_until >= 0 && now >= switching_until)
+                {
                     switching_until = -1;
                 }
-                if (switching_until < 0) {
+                if (switching_until < 0)
+                {
                     switch_pending = 0;
                 }
 
-                if (input_ended && allFinished(processes)) {
+                if (input_ended && allFinished(processes))
+                {
                     break;
                 }
-                if (input_ended && !warned_no_policy) {
+                if (input_ended && !warned_no_policy)
+                {
                     fprintf(stderr,
                             "scheduler: no scheduling policy selected a READY "
                             "process; link the SJF/RR/HPF policy hooks\n");
@@ -472,18 +556,3 @@ int main(int argc, char **argv)
     freeData(processes, resources);
     return stop_requested ? 130 : 0;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
